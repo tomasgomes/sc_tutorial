@@ -1,0 +1,183 @@
+---
+title: "Exploring variation in scRNA-seq datasets"
+output: html_notebook
+---
+
+
+
+# General
+Load necessary libraries
+ 
+```{r}
+# Package installation
+## CRAN
+###install.packages(c("Seurat", "Matrix", "dplyr", "gprofiler2", "ggplot2", 
+###                   "patchwork", "gplots", "cowplot", "pheatmap", 
+###                     "reshape2", "devtools"))
+## Github
+### devtools::install_github('satijalab/seurat-data')
+
+# data manipulation
+library(Seurat)
+library(SeuratData)
+library(Matrix)
+library(dplyr)
+library(reshape2)
+
+# plotting
+library(ggplot2)
+library(patchwork)
+library(cowplot)
+library(pheatmap)
+
+set.seed(1)
+```
+
+
+
+# Exploring variation
+## Variation by selected variable genes
+Load data
+
+```{r}
+srat = readRDS("Example_filt_srat.RDS")
+```
+
+Normalise expression of each gene in each cell by the total counts in that cell, with a scaling factor of 10.000, and then log-transform the data.
+
+```{r}
+DefaultAssay(srat) = "RNA"
+srat = NormalizeData(srat, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+Run with different numbers of variable genes
+
+```{r}
+nfeature_l = c(100, 1000, 5000, 12000)
+srat_l = list()
+for(i in nfeature_l){
+  start.time = Sys.time()
+  print(paste0("Using the top ", i, " variable genes."))
+  
+  # calculate variable features (with different top genes)
+  srat_l[[paste0("f", i)]] = FindVariableFeatures(srat, 
+                                                  selection.method = "vst", 
+                                                  nfeatures = i, verbose = F)
+  # scale the data
+  srat_l[[paste0("f", i)]] = ScaleData(srat_l[[paste0("f", i)]], 
+                                       vars.to.regress = c("nCount_RNA"), 
+                                       do.scale = F, verbose = F)
+         
+  # run PCA
+  srat_l[[paste0("f", i)]] = RunPCA(srat_l[[paste0("f", i)]], verbose = F, 
+                                    assay = "RNA", npcs = 30) # asking for fewer to speed up execution
+         
+  # run UMAP
+  ncomp = 15
+  srat_l[[paste0("f", i)]] = RunUMAP(srat_l[[paste0("f", i)]], 
+                                           dims = 1:ncomp, verbose = F)
+  
+  # clustering
+  red = "pca"
+  srat_l[[paste0("f", i)]] = FindNeighbors(srat_l[[paste0("f", i)]], dims = 1:ncomp, 
+                                                 force.recalc = T, verbose = F,
+                                                 reduction = red, graph.name = paste0(red, ncomp))
+  srat_l[[paste0("f", i)]]  = FindClusters(srat_l[[paste0("f", i)]] , algorithm = 2, 
+                                                 verbose = F, graph.name = paste0(red, ncomp),
+                                                 resolution = 3) # using a hig resolution for cluster comparisons
+  srat_l[[paste0("f", i)]] = SetIdent(srat_l[[paste0("f", i)]], value = paste0(red, ncomp, "_res.3"))
+  end.time = Sys.time()
+  print(paste0("Execution time: ", round(difftime(end.time, start.time, units = "sec"), 1), " seconds."))
+  gc(full = T)
+}
+```
+
+
+
+```{r, fig.height=8, fig.width=8}
+plt_list = list()
+# iterate each clustering resolution
+for(g in names(srat_l)){
+  plt_list[[g]] = DimPlot(srat_l[[g]], reduction = "umap", label = T, 
+                          raster = F, pt.size = 0.2, shuffle = T)+
+    labs(subtitle = g)+
+    theme(legend.position = "none",
+          aspect.ratio = 1)
+}
+cowplot::plot_grid(plotlist = plt_list, ncol = 2)
+```
+
+Compare clusters by correlation
+
+```{r}
+# choose a common set of genes to calculate the correlations (marker genes would likely work best)
+g = VariableFeatures(srat_l$f5000)
+# all pairwise combinations
+comp_obj = combn(names(srat_l), 2)
+for(i in 1:ncol(comp_obj)){
+  # calculate avg expression per cluster for each set of genes
+  avg1 = AverageExpression(srat_l[[comp_obj[1,i]]], assay = "RNA", features = g, group.by = "pca15_res.3")$RNA
+  avg2 = AverageExpression(srat_l[[comp_obj[2,i]]], assay = "RNA", features = g, group.by = "pca15_res.3")$RNA
+  
+  # correlation (Spearman)
+  cor_mat = cor(as.matrix(avg1), as.matrix(avg2), method = "sp")
+  
+  pheatmap::pheatmap(cor_mat, clustering_method = "ward.D", 
+                     main = paste0(comp_obj[1,i], " (rows) vs ", comp_obj[2,i], " (columns)"))
+}
+```
+
+
+## Variation in principal components
+Load data
+
+```{r}
+srat = readRDS("Example_final_sct.RDS")
+```
+
+Check which PCs influence which clusters
+
+```{r, fig.height=8, fig.width=15}
+pca_dat = data.frame(Reductions(srat, "pca")@cell.embeddings[,1:18])
+pca_dat$cl = srat$pca15_res.1
+plot_df = reshape2::melt(pca_dat)
+
+ggplot(plot_df, aes(x = cl, y = value, colour = cl))+
+  facet_wrap(~variable, scales = "free", ncol = 6)+
+  ggbeeswarm::geom_quasirandom(size = 0.2)+
+  geom_hline(yintercept = 0)+
+  theme_classic()+
+  theme(legend.position = "none")
+```
+
+Now we will remove the PCs tat seem more associated with cluster 8
+
+```{r}
+pcs_use = c(1:11, 13)
+srat_rep = Seurat::RunUMAP(srat, reduction = "pca", verbose = F, 
+                           dims = pcs_use, reduction.name = "umap_rep")
+srat_rep = FindNeighbors(srat_rep, dims = pcs_use, force.recalc = T, 
+                         verbose = F, reduction = "pca", graph.name = "pcarec")
+srat_rep = FindClusters(srat_rep, algorithm = 2, verbose = F, graph.name = "pcarec",
+                        resolution = 1)
+```
+
+And plot the original clustering, with the old and new UMAPs
+
+```{r}
+plt_before = DimPlot(srat_rep, reduction = "umap", 
+                     group.by = "pca15_res.1", label = T)
+plt_after = DimPlot(srat_rep, reduction = "umap_rep", 
+                    group.by = "pca15_res.1", label = T)
+
+plt_before+plt_after
+```
+
+
+
+
+
+
+
+
+
