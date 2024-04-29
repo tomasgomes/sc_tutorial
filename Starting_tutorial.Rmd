@@ -98,6 +98,7 @@ cellcond = colSums(exp)>0 & (meta$iscell_dd | meta$iscell_ed)
 genecond = rowSums(exp)>0
 exp = exp[genecond, cellcond]
 meta = meta[cellcond,]
+print(dim(exp))
 
 # we will be using gene names instead of gene IDs for this analysis. because the same gene name may be
 ## assigned to different genes, we first need to join them by summing their counts
@@ -146,7 +147,8 @@ plot1 + plot2
 Apply QC filters, decided from the previous plot
 
 ```{r}
-qcthr = c("maxMT" = 15, "minC" = 1000, "minG" = 750, "maxC" = 20000, "maxG" = 4000)
+qcthr = c("maxMT" = 15, "minC" = 1000, "minG" = 750, 
+          "maxC" = 20000, "maxG" = 4000)
 
 cells = srat$percent.mt<qcthr["maxMT"] & srat$nCount_RNA>qcthr["minC"] &
         srat$nCount_RNA<qcthr["maxC"] & srat$nFeature_RNA>qcthr["minG"] &
